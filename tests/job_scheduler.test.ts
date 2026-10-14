@@ -3683,4 +3683,26 @@ describe('Job Scheduler', () => {
       expect(isScheduler).toBe(true);
     });
   });
+
+  it('should keep job scheduler iterations in wait when draining jobs added before them', async () => {
+    const date = new Date('2017-02-07 9:24:00');
+    clock.setSystemTime(date);
+
+    await queue.add('first', { idx: 1 });
+    await queue.upsertJobScheduler('scheduler-a', { every: 5000 });
+    await queue.add('second', { idx: 2 });
+    await queue.upsertJobScheduler('scheduler-b', { every: 5000 });
+
+    const iterationIds = (await queue.getRanges(['wait'], 0, -1)).filter(id =>
+      id.startsWith('repeat:'),
+    );
+    expect(iterationIds.length).toEqual(2);
+
+    await queue.drain();
+
+    expect(await queue.getRanges(['wait'], 0, -1)).toEqual(iterationIds);
+    for (const id of iterationIds) {
+      expect(await queue.getJobState(id)).toEqual('waiting');
+    }
+  });
 });
