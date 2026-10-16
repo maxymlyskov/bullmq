@@ -194,6 +194,69 @@ describe('Rate Limiter', () => {
         await worker.close();
       }, 2000);
     });
+
+    it('keeps the global duration when the worker has a limiter of its own', async () => {
+      await queue.setGlobalRateLimit(1, 2000);
+
+      let processed = 0;
+      const worker = new Worker(
+        queueName,
+        async () => {
+          processed++;
+        },
+        {
+          connection,
+          prefix,
+          limiter: { max: 10, duration: 100 },
+        },
+      );
+
+      await queue.addBulk(
+        Array.from(Array(5).keys()).map(() => ({
+          name: 'rate test',
+          data: {},
+        })),
+      );
+      await delay(1000);
+      await worker.close();
+
+      expect(processed).toBe(1);
+    });
+
+    it('keeps the global duration for the job fetched after a completion', async () => {
+      await queue.setGlobalRateLimit(1, 1000);
+
+      let ttlOfSecondJob: number | undefined;
+      const worker = new Worker(
+        queueName,
+        async job => {
+          if (job.data.index === 0) {
+            await delay(1100);
+          } else {
+            ttlOfSecondJob = await queue.getRateLimitTtl();
+          }
+        },
+        {
+          connection,
+          prefix,
+          limiter: { max: 10, duration: 100 },
+        },
+      );
+
+      const completed = new Promise<void>(resolve => {
+        worker.on('completed', after(2, resolve));
+      });
+      await queue.addBulk(
+        Array.from(Array(2).keys()).map(index => ({
+          name: 'rate test',
+          data: { index },
+        })),
+      );
+      await completed;
+      await worker.close();
+
+      expect(ttlOfSecondJob).toBeGreaterThan(500);
+    });
   });
 
   it('should obey the rate limit', { timeout: 15000 }, async () => {

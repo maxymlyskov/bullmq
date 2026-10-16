@@ -68,7 +68,8 @@ if expireTime > 0 then return {0, 0, expireTime, 0} end
 -- paused or maxed queue
 if isPausedOrMaxed then return {0, 0, 0, 0} end
 
-local limiterDuration = (opts['limiter'] and opts['limiter']['duration']) or rateLimitDuration
+local limiterDuration = (rateLimitMax and rateLimitDuration) or
+    (opts['limiter'] and opts['limiter']['duration']) or rateLimitDuration
 
 -- no job ID, try non-blocking move from wait to active
 local jobId = rcall("RPOPLPUSH", waitKey, activeKey)

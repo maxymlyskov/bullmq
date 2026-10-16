@@ -53,7 +53,8 @@ local function fetchNextJob(waitKey, activeKey, prioritizedKey, eventStreamKey,
         return {0, 0, 0, 0}
     end
 
-    local limiterDuration = (opts['limiter'] and opts['limiter']['duration']) or rateLimitDuration
+    local limiterDuration = (rateLimitMax and rateLimitDuration) or
+        (opts['limiter'] and opts['limiter']['duration']) or rateLimitDuration
 
     local jobId = rcall("RPOPLPUSH", waitKey, activeKey)
 

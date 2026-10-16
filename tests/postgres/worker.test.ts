@@ -261,4 +261,29 @@ describe('PostgreSQL Worker (end-to-end)', () => {
     await queueEvents.close();
     await queue.close();
   });
+
+  it('keeps the global rate limit duration when the worker has a limiter of its own', async () => {
+    const qname = `wq-${randomUUID()}`;
+    const queue = new Queue(qname, { connection: {} });
+    await queue.setGlobalRateLimit(1, 2000);
+
+    let processed = 0;
+    const worker = new Worker(
+      qname,
+      async () => {
+        processed++;
+      },
+      { connection: {}, drainDelay: 1, limiter: { max: 10, duration: 100 } },
+    );
+
+    await worker.waitUntilReady();
+    await queue.addBulk(
+      Array.from({ length: 5 }, () => ({ name: 'rate', data: {} })),
+    );
+    await new Promise(r => setTimeout(r, 1000));
+    await worker.close();
+    await queue.close();
+
+    expect(processed).toBe(1);
+  });
 });
