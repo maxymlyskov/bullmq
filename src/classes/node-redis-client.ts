@@ -194,6 +194,9 @@ class NodeRedisAdapter<TClient extends NodeRedisRawClient>
   implements IRedisClient
 {
   private scripts = new Map<string, LuaScript>();
+  // SHAs loaded by ensureScriptsLoaded on the current connection. Cleared on
+  // every (re)connect, since a restarted server has an empty script cache.
+  private loadedScriptShas = new Set<string>();
   private statusOverride: string | undefined;
   private hasConnected = false;
   private destroying = false;
@@ -254,6 +257,7 @@ class NodeRedisAdapter<TClient extends NodeRedisRawClient>
     // applied.
     raw.on('ready', () => {
       this.hasConnected = true;
+      this.loadedScriptShas.clear();
       if (this.connectionName) {
         this.raw.clientSetName(this.connectionName).then(
           () => this.emit('ready'),
@@ -497,12 +501,31 @@ class NodeRedisAdapter<TClient extends NodeRedisRawClient>
     }
   }
 
+  /**
+   * SCRIPT LOAD the given scripts unless they were loaded on this connection,
+   * so that EVALSHA calls queued in a transaction cannot fail with NOSCRIPT.
+   */
+  async ensureScriptsLoaded(scripts: LuaScript[]): Promise<void> {
+    const missing = new Map<string, string>();
+    for (const { sha, lua } of scripts) {
+      if (!this.loadedScriptShas.has(sha)) {
+        missing.set(sha, lua);
+      }
+    }
+    await Promise.all(
+      [...missing].map(async ([sha, lua]) => {
+        await this.raw.scriptLoad(lua);
+        this.loadedScriptShas.add(sha);
+      }),
+    );
+  }
+
   // ---------------------------------------------------------------
   // Pipeline / Transaction
   // ---------------------------------------------------------------
 
   multi(): IRedisTransaction {
-    return new NodeRedisTransaction(this.raw.multi(), this.scripts);
+    return new NodeRedisTransaction(this.raw.multi(), this.scripts, this);
   }
 
   pipeline(): IRedisTransaction {
@@ -924,10 +947,12 @@ class NodeRedisAdapter<TClient extends NodeRedisRawClient>
 
 class NodeRedisTransaction implements IRedisTransaction {
   private transformers: ((val: any) => any)[] = [];
+  private scriptsToLoad: LuaScript[] = [];
 
   constructor(
     private readonly raw: any,
     private readonly scripts: Map<string, LuaScript>,
+    private readonly adapter: NodeRedisAdapter<any>,
   ) {}
 
   private addIdentityTransformer(): void {
@@ -1042,14 +1067,16 @@ class NodeRedisTransaction implements IRedisTransaction {
       return String(a);
     });
 
-    // Use evalSha in pipeline; NOSCRIPT handling happens at exec()-time
-    // node-redis multi supports evalSha
+    // Use evalSha in pipeline; exec() SCRIPT LOADs it first, since a NOSCRIPT
+    // reply inside MULTI cannot fall back to EVAL.
+    this.scriptsToLoad.push(script);
     this.raw.evalSha(sha, { keys: cmdKeys, arguments: argv });
     this.addIdentityTransformer();
     return this;
   }
 
   async exec(): Promise<[Error | null, any][] | null> {
+    await this.adapter.ensureScriptsLoaded(this.scriptsToLoad);
     const results = await this.raw.exec();
     if (!results) {
       return null;

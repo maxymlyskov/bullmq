@@ -9,7 +9,15 @@
  *
  * To test a different adapter, change the `createTestClient()` factory below.
  */
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import {
+  describe,
+  it,
+  expect,
+  beforeAll,
+  afterAll,
+  beforeEach,
+  vi,
+} from 'vitest';
 import { createClient } from 'redis';
 import { createNodeRedisClient } from '../src/classes';
 import { IRedisClient } from '../src/interfaces';
@@ -688,6 +696,67 @@ describe('Adapter Conformance', () => {
       // Verify the script actually ran
       const v = await client.get(key('tx-lua'));
       expect(v).toBe('hello');
+    });
+
+    it('should run a transaction script after reconnecting to a server that lost its script cache', async () => {
+      const conn = await createTestClient();
+      // The killed socket is reported as an error before the reconnect.
+      conn.on('error', () => {});
+      try {
+        conn.defineCommand('txReloadScript', {
+          numberOfKeys: 1,
+          lua: `redis.call('SET', KEYS[1], ARGV[1]); return 'reloaded'`,
+        });
+        const warmup = conn.multi();
+        warmup.runCommand('txReloadScript', [key('tx-reload'), 'warmup']);
+        expect(await warmup.exec()).toEqual([[null, 'reloaded']]);
+
+        // A Redis restart empties the script cache and drops the connection;
+        // the client then reconnects on its own.
+        const reconnected = new Promise(resolve => conn.once('ready', resolve));
+        const id = await (conn as any).raw.sendCommand(['CLIENT', 'ID']);
+        await (client as any).raw.sendCommand(['SCRIPT', 'FLUSH']);
+        await (client as any).raw.sendCommand([
+          'CLIENT',
+          'KILL',
+          'ID',
+          `${id}`,
+        ]);
+        await reconnected;
+
+        const tx = conn.multi();
+        tx.runCommand('txReloadScript', [key('tx-reload'), 'after']);
+
+        expect(await tx.exec()).toEqual([[null, 'reloaded']]);
+        expect(await client.get(key('tx-reload'))).toBe('after');
+      } finally {
+        await conn.quit();
+      }
+    });
+
+    it('should load a script queued in transactions once per connection', async () => {
+      const conn = await createTestClient();
+      try {
+        conn.defineCommand('txLoadOnceScript', {
+          numberOfKeys: 0,
+          lua: `return 'once'`,
+        });
+        const scriptLoad = vi.spyOn((conn as any).raw, 'scriptLoad');
+
+        for (let i = 0; i < 2; i++) {
+          const tx = conn.multi();
+          tx.runCommand('txLoadOnceScript', []);
+          tx.runCommand('txLoadOnceScript', []);
+          expect(await tx.exec()).toEqual([
+            [null, 'once'],
+            [null, 'once'],
+          ]);
+        }
+
+        expect(scriptLoad).toHaveBeenCalledTimes(1);
+      } finally {
+        await conn.quit();
+      }
     });
   });
 
