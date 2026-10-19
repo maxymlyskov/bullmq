@@ -710,13 +710,20 @@ export class Job<
     ) {
       const opts = this.queue.opts;
 
-      const delay = await Backoffs.calculate(
-        <BackoffOptions>this.opts.backoff,
-        this.attemptsMade + 1,
-        err,
-        this,
-        opts.settings && opts.settings.backoffStrategy,
-      );
+      let delay: number | undefined;
+      try {
+        delay = await Backoffs.calculate(
+          <BackoffOptions>this.opts.backoff,
+          this.attemptsMade + 1,
+          err,
+          this,
+          opts.settings && opts.settings.backoffStrategy,
+        );
+      } catch (backoffErr) {
+        // No delay can be computed, so fail the job with the processor's error.
+        this.queue.emit('error', <Error>backoffErr);
+        return [false, 0];
+      }
 
       return [delay == -1 ? false : true, delay == -1 ? 0 : delay];
     } else {

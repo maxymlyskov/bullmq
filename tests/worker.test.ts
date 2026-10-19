@@ -27,7 +27,7 @@ import {
   WaitingError,
 } from '../src/classes';
 import { MinimalJob, IRedisClient } from '../src/interfaces';
-import { JobsOptions, KeepJobs } from '../src/types';
+import { BackoffStrategy, JobsOptions, KeepJobs } from '../src/types';
 import { delay, isRedisVersionLowerThan, randomUUID } from '../src/utils';
 import { createTestConnection } from './utils/connection-factory';
 import { cleanupQueue } from './utils/cleanup-queue';
@@ -4924,6 +4924,80 @@ describe('workers', () => {
       );
 
       await worker.close();
+    });
+
+    describe('when the backoff strategy throws', () => {
+      const failWithBackoff = async (
+        backoffType: string,
+        backoffStrategy?: BackoffStrategy,
+      ) => {
+        let runs = 0;
+        const worker = new Worker(
+          queueName,
+          async () => {
+            runs++;
+            throw new Error('processor error');
+          },
+          { connection, prefix, settings: { backoffStrategy } },
+        );
+        const errors: string[] = [];
+        worker.on('error', err => {
+          errors.push(err.message);
+        });
+        const failed = new Promise<void>(resolve => {
+          worker.on('failed', () => resolve());
+        });
+
+        const job = await queue.add(
+          'test',
+          { foo: 'bar' },
+          { attempts: 3, backoff: { type: backoffType } },
+        );
+        await Promise.race([failed, delay(2000)]);
+
+        const state = await job.getState();
+        const { failedReason } = await Job.fromId(queue, job.id!);
+        await worker.close();
+
+        return { state, failedReason, runs, errors };
+      };
+
+      it('fails the job with the processor error when the custom backoff throws', async () => {
+        const result = await failWithBackoff('custom', () => {
+          throw new Error('backoff error');
+        });
+
+        expect(result).toEqual({
+          state: 'failed',
+          failedReason: 'processor error',
+          runs: 1,
+          errors: ['backoff error'],
+        });
+      });
+
+      it('fails the job with the processor error when the custom backoff rejects', async () => {
+        const result = await failWithBackoff('custom', async () => {
+          throw new Error('config service unavailable');
+        });
+
+        expect(result).toEqual({
+          state: 'failed',
+          failedReason: 'processor error',
+          runs: 1,
+          errors: ['config service unavailable'],
+        });
+      });
+
+      it('fails the job with the processor error when the backoff type is unknown', async () => {
+        const result = await failWithBackoff('unknown');
+
+        expect(result).toEqual({
+          state: 'failed',
+          failedReason: 'processor error',
+          runs: 1,
+          errors: [expect.stringContaining('Unknown backoff strategy unknown')],
+        });
+      });
     });
 
     /*

@@ -449,6 +449,44 @@ class TestWorker(unittest.IsolatedAsyncioTestCase):
         await queue.close()
         await worker.close()
 
+    async def test_fail_job_with_processor_error_when_backoff_strategy_raises(self):
+        queue = Queue(queueName, {"prefix": prefix})
+        runs = 0
+
+        async def process(job: Job, token: str):
+            nonlocal runs
+            runs += 1
+            raise Exception("processor error")
+
+        def backoff_strategy(attempts_made, type, err, job):
+            raise Exception("backoff error")
+
+        worker = Worker(queueName, process, {"settings": {
+            "backoffStrategy": backoff_strategy
+        }, "prefix": prefix})
+
+        errors = []
+        worker.on("error", lambda err, job=None: errors.append(str(err)))
+        failed_events = Future()
+        worker.on("failed", lambda job, err: failed_events.done() or failed_events.set_result(None))
+
+        job = await queue.add("test", { "foo": "bar" },
+                {"attempts": 3, "backoff": {"type": "custom"}})
+
+        try:
+            await asyncio.wait_for(failed_events, 2)
+        except asyncio.TimeoutError:
+            pass
+
+        self.assertEqual(await queue.getJobState(job.id), "failed")
+        failed_job = await Job.fromId(queue, job.id)
+        self.assertEqual(failed_job.failedReason, "processor error")
+        self.assertEqual(runs, 1)
+        self.assertEqual(errors, ["backoff error"])
+
+        await worker.close()
+        await queue.close()
+
     async def test_create_children_at_runtime(self):
         parent_queue_name = f"__parent_queue__{uuid4().hex}"
         parent_queue = Queue(parent_queue_name, {"prefix": prefix})

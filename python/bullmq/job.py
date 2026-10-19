@@ -216,10 +216,15 @@ class Job:
 
         result = None
         if (self.attemptsMade + 1) < self.opts.get('attempts') and not self.discarded and not isinstance(err, UnrecoverableError):
-            delay = await Backoffs.calculate(
-                self.opts.get('backoff'), self.attemptsMade + 1,
-                err, self, self.queue.opts.get("settings") and self.queue.opts['settings'].get("backoffStrategy")
-                )
+            try:
+                delay = await Backoffs.calculate(
+                    self.opts.get('backoff'), self.attemptsMade + 1,
+                    err, self, self.queue.opts.get("settings") and self.queue.opts['settings'].get("backoffStrategy")
+                    )
+            except Exception as backoff_err:
+                # No delay can be computed, so fail the job with the processor's error.
+                self.queue.emit("error", backoff_err, self)
+                delay = -1
             if delay == -1:
                 move_to_failed = True
             elif delay:
